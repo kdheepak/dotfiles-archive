@@ -22,6 +22,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm
+from litellm import completion
 
 console = Console()
 app = typer.Typer(
@@ -106,24 +107,15 @@ def _ensure_copilot_model(model: str | None) -> str:
     return model if model.startswith("github_copilot/") else f"github_copilot/{model}"
 
 
-def _gen_with_copilot(
+def _generate(
     *,
     description: str,
     script_name: str,
     model: str,
-    api_key: Optional[str],
     temperature: float,
     max_tokens: int,
     system_prompt: Optional[str] = None,
 ) -> str:
-    try:
-        from litellm import completion
-    except Exception as e:
-        raise RuntimeError(f"LiteLLM import failed: {e}")
-
-    # Copilot auth: allow flag or env; keep env var explicit.
-    if api_key:
-        os.environ.setdefault("GITHUB_COPILOT_API_KEY", api_key)
 
     sys_prompt = system_prompt or textwrap.dedent(
         """\
@@ -142,8 +134,7 @@ def _gen_with_copilot(
         - Use Typer for CLI and Rich for console output
         - Are a single-file tool shaped from the description
         - Output ONLY code, no markdown fences or commentary.
-
-
+        - Use modern, idiomatic Python (3.12+) and modern type hints.
         """
     )
 
@@ -193,10 +184,9 @@ def new(
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite if the file already exists"),
     print_only: bool = typer.Option(False, "--print", help="Print the generated code instead of writing a file"),
     preview: bool = typer.Option(False, "--preview", help="Show a confirmation panel before writing the file"),
-    model: Optional[str] = typer.Option(None, "--model", "-m", help="GitHub Copilot model (auto-prefixed to github_copilot/ if missing)"),
-    api_key: Optional[str] = typer.Option(None, "--api-key", help="GitHub Copilot API key (defaults to GITHUB_COPILOT_API_KEY env var)", envvar="GITHUB_COPILOT_API_KEY"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="LiteLLM model (auto-prefixed to github_copilot/ if missing)"),
     temperature: float = typer.Option(0.2, "--temperature", min=0.0, max=2.0),
-    max_tokens: int = typer.Option(3000, "--max-tokens", help="Generation token limit"),
+    max_tokens: int = typer.Option(3000, "--max-tokens", help="Token limit"),
 ) -> None:
     """
     Generate a new Python script using GitHub Copilot (via LiteLLM) from --description.
@@ -207,15 +197,15 @@ def new(
     dir.mkdir(parents=True, exist_ok=True)
     path = dir / filename
 
-    copilot_model = _ensure_copilot_model(model)
+    if model is None or not model.contains("/"):
+        model = _ensure_copilot_model(model)
 
     # Try AI generation; always fall back on any error
     try:
-        content = _gen_with_copilot(
+        content = _generate(
             description=description,
             script_name=script_name,
-            model=copilot_model,
-            api_key=api_key,
+            model=model,
             temperature=temperature,
             max_tokens=max_tokens,
         )
