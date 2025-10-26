@@ -473,9 +473,6 @@ def main(
 ):
     """
     Download assets from a GitHub release.
-
-    By default, fetches the *latest* release unless --tag is given.
-    Filters can be combined. When --match-platform is on, OS/arch heuristics are applied.
     """
 
     token = get_token()
