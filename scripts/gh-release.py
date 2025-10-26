@@ -402,6 +402,9 @@ async def download_many(
                 else:
                     console.print(f"[green]Checksum OK[/green] {a.name}")
         if failures:
+            console.print(
+                "[red]Error:[/red] Checksum verification failed after download."
+            )
             raise SystemExit(2)
 
 
