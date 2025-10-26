@@ -251,16 +251,29 @@ def section_cube() -> Panel:
 
 
 def section_gray() -> Panel:
-    # One-line gray ramp: 232..255 (gray0..gray23)
+    # One-line gray ramp (232..255) with Taskwarrior-style labels on top.
     indices = [232 + i for i in range(24)]
-    row = Text()
-    for i in indices:
-        row.append_text(swatch_256_bg(i, 2))  # make tighter by changing width to 1
+    swatch_width = 2  # width of each gray swatch block
 
+    # Build the swatch row
+    swatches = Text()
+    for i in indices:
+        swatches.append_text(swatch_256_bg(i, swatch_width))
+
+    # Build the label row: "0 1 2 . . .           . . . 23"
+    left_label = "0 1 2 . . . "
+    right_label = ". . . 23"
+    total_width = len(indices) * (swatch_width)
+    middle_spaces = max(1, total_width - len(left_label) - len(right_label))
+    label = Text(left_label + (" " * middle_spaces) + right_label, style="dim")
+
+    # Compose panel: label on top, swatches below
     grid = Table.grid(padding=0)
     grid.add_column(no_wrap=True)
-    grid.add_row(row)
-    return Panel(grid, title="Gray ramp 232–255 (gray0–gray23)")
+    grid.add_row(label)
+    grid.add_row(swatches)
+
+    return Panel(grid, title="Gray ramp gray0 – gray23 (also color232 – color255)")
 
 
 # ---------- Main ----------
