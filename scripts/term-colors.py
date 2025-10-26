@@ -214,15 +214,30 @@ def section_dynamic(dyn_hex: dict) -> Panel:
 
 
 def section_cube() -> Panel:
-    # Always render the full 16–231 cube in one panel.
-    # Layout: 6 columns (R=0..5). Each cell is a horizontal strip of B=0..5,
-    # stacked across rows for G=0..5.
+    # Color cube with Taskwarrior-style labels:
+    #   header row:      0            1            2            3            4            5
+    #   header sub-row:  0 1 2 3 4 5  0 1 2 3 4 5  ...
+    #   row labels:      0..5 down the left side (G axis)
     grid = Table.grid(padding=(0, 1))
+    grid.add_column(justify="right", no_wrap=True)  # row labels (G)
     for _ in range(6):
-        grid.add_column(no_wrap=True)
+        grid.add_column(no_wrap=True)  # columns for R=0..5
 
+    # Header line: "0 1 2 3 4 5" centered over each R column
+    header_top = [Text(" ", style="dim")] + [
+        Text(f"{r}", style="dim") for r in range(6)
+    ]
+    grid.add_row(*header_top)
+
+    # Header sub-line: "0 1 2 3 4 5" within each column (B axis legend)
+    header_seq = [Text(" ", style="dim")] + [
+        Text("0 1 2 3 4 5", style="dim") for _ in range(6)
+    ]
+    grid.add_row(*header_seq)
+
+    # Body: rows for G=0..5, each column shows a strip for B=0..5 at that R
     for g in range(6):
-        row_cells = []
+        row_cells = [Text(f"{g}", style="dim")]
         for r in range(6):
             strip = Text()
             for b in range(6):
@@ -231,7 +246,8 @@ def section_cube() -> Panel:
             row_cells.append(strip)
         grid.add_row(*row_cells)
 
-    return Panel(grid, title="Color cube 16–231 (rgb000–rgb555)")
+    title = "Color cube rgb000 – rgb555 (also color16 – color231)"
+    return Panel(grid, title=title)
 
 
 def section_gray() -> Panel:
