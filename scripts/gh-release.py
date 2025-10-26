@@ -1,540 +1,532 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
 # -*- coding: utf-8 -*-
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
-#     "httpx",
-#     "rich",
-#     "typer",
-#     "platformdirs",
-#     "ghapi",
+#   "httpx>=0.27.0",
+#   "typer>=0.12.5",
+#   "rich>=13.7.1",
+#   "platformdirs>=4.2.2",
 # ]
 # ///
+"""
+gh-release: Download GitHub release assets with smart platform matching,
+parallel downloads, checksum detection, and resumable transfers.
 
-"""Download binaries from GitHub releases."""
+Usage
+-----
+# Show latest release and what would be downloaded
+uv run gh-release.py --repo cli/cli --list
 
+# Download assets that match your current platform only
+uv run gh-release.py --repo sharkdp/bat --match-platform --dir ./bin
+
+# Download all release assets for a specific tag, with 8 workers
+uv run gh-release.py --repo BurntSushi/ripgrep --tag 14.1.0 --parallel 8
+
+# Filter by simple substring(s) or regex
+uv run gh-release.py --repo junegunn/fzf --include linux,amd64 --exclude "musl|arm"
+uv run gh-release.py --repo junegunn/fzf --regex "(linux|darwin).*(amd64|arm64)"
+
+# Verify checksums if checksum files exist
+uv run gh-release.py --repo stedolan/jq --verify
+
+Notes
+-----
+- GitHub token: read from $GITHUB_TOKEN or $GH_TOKEN if set (higher rate limits).
+- Resumes partial downloads into *.part files. If the server supports range
+  requests, it continues; otherwise it starts fresh.
+- Checksums: the script *detects* checksum assets, downloads them first, and
+  uses them to verify relevant assets when --verify is on.
+
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
 import os
 import platform
-import stat
-import tarfile
-import zipfile
-import tempfile
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Annotated
+from typing import Iterable, Optional
 
 import httpx
 import typer
+from platformdirs import user_cache_dir
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn
+from rich.progress import (
+    Progress,
+    BarColumn,
+    DownloadColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 from rich.table import Table
-from rich.prompt import Prompt, Confirm
-from ghapi.all import GhApi
-from ghapi.core import HTTP403ForbiddenError
 
-from platformdirs import user_config_dir
-import time
-import json
-
-
-APP_NAME = "com.kdheepak.gh-release"
-CONFIG_FILE = Path(user_config_dir(APP_NAME)) / "config.json"
-GITHUB_CLIENT_ID = "Ov23liQ6dKYzJrqA6zef"
-
-
+app = typer.Typer(add_completion=False)
 console = Console()
-app = typer.Typer(
-    help="Download binaries from GitHub releases.",
-    no_args_is_help=True,
-    rich_markup_mode="rich",
+
+GITHUB_API = "https://api.github.com"
+
+
+# ----------------------------- Utility helpers ----------------------------- #
+
+
+def human_size(n: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    f = float(n)
+    for u in units:
+        if f < 1024.0:
+            return f"{f:.1f} {u}"
+        f /= 1024.0
+    return f"{f:.1f} PB"
+
+
+def clamp(n: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, n))
+
+
+def sha256sum(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def get_token() -> Optional[str]:
+    return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+
+
+def cache_dir() -> Path:
+    return Path(user_cache_dir(appname="gh-release-combined", appauthor=False))
+
+
+@dataclass(slots=True)
+class Asset:
+    name: str
+    url: str
+    size: int
+    id: int
+
+
+@dataclass(slots=True)
+class ReleaseInfo:
+    tag: str
+    name: str
+    assets: list[Asset]
+
+
+OS_MAP = {
+    "linux": ["linux", "gnu"],
+    "darwin": ["darwin", "mac", "macos", "osx"],
+    "windows": ["windows", "win", "win32", "win64", "msvc", "mingw"],
+}
+
+ARCH_MAP = {
+    "x86_64": "amd64",
+    "amd64": "amd64",
+    "aarch64": "arm64",
+    "arm64": "arm64",
+    "armv7l": "armv7",
+    "armv7": "armv7",
+    "armhf": "armv7",
+    "arm": "arm",
+    "i386": "386",
+    "i686": "386",
+    "ppc64le": "ppc64le",
+    "s390x": "s390x",
+}
+
+
+def current_platform_terms() -> list[str]:
+    sys = platform.system().lower()
+    mach = ARCH_MAP.get(platform.machine().lower(), platform.machine().lower())
+    terms: list[str] = []
+
+    # OS aliases
+    os_aliases = []
+    if sys in OS_MAP:
+        os_aliases.extend(OS_MAP[sys])
+    else:
+        os_aliases.append(sys)
+
+    # Arch variants
+    arch_aliases = [mach]
+    if mach == "amd64":
+        arch_aliases += ["x86_64", "x64", "64bit"]
+    elif mach == "arm64":
+        arch_aliases += ["aarch64"]
+
+    # Common terms to look for in asset names
+    terms.extend(os_aliases + arch_aliases)
+
+    # File suffixes that often differentiate builds
+    if sys == "windows":
+        terms += ["windows.zip", "win.zip", "msvc", "exe", "msi"]
+    elif sys == "darwin":
+        terms += ["darwin.tar.gz", "macos.tar.gz", "apple-darwin", "universal"]
+    else:
+        terms += ["linux.tar.gz", "linux.tgz", "unknown-linux-gnu", "musl", "gnu"]
+
+    return list(dict.fromkeys(terms))  # dedupe while preserving order
+
+
+# --------------------------- Checksum recognition --------------------------- #
+
+CHECKSUM_BUNDLE_RE = re.compile(
+    r"^(sha256sum(?:s)?|sha256sums|checksums|checksum|sha256|sha256sum\.txt|sha256sum\.sha|SHA256SUMS|SUMS|CHECKSUMS)(\.\w+)?$",
+    re.IGNORECASE,
 )
 
 
-class GitHubReleaseDownloader:
-    """Handle downloading binaries from GitHub releases."""
-
-    def __init__(self, owner: str, repo: str, token: str | None = None):
-        self.owner = owner
-        self.repo = repo
-        # ghapi handles rate limiting automatically
-        self.api = GhApi(owner=owner, repo=repo, token=token)
-        self.client = httpx.Client(follow_redirects=True, timeout=30.0)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.client.close()
-
-    def get_platform_info(self) -> tuple[list[str], str]:
-        """Detect the current platform."""
-        system = platform.system().lower()
-        machine = platform.machine().lower()
-
-        # Normalize machine architecture
-        arch_map = {
-            "x86_64": "amd64",
-            "amd64": "amd64",
-            "aarch64": "arm64",
-            "arm64": "arm64",
-            "armv7l": "armv7",
-            "i386": "386",
-            "i686": "386",
-        }
-        arch = arch_map.get(machine, machine)
-
-        # Normalize OS names
-        os_map = {
-            "darwin": ["darwin", "macos", "osx"],
-            "linux": ["linux"],
-            "windows": ["windows", "win"],
-        }
-
-        os_names = os_map.get(system, [system])
-
-        return os_names, arch
-
-    def get_release(self) -> dict[str, Any]:
-        """Fetch release information from GitHub."""
-        try:
-            release = self.api.repos.get_latest_release()
-            return release
-        except HTTP403ForbiddenError as e:
-            if "rate limit" in str(e).lower():
-                console.print("[red]GitHub API rate limit exceeded.[/red]")
-                console.print(
-                    "[yellow]Consider setting GH_RELEASE_GITHUB_TOKEN environment variable or using --token flag.[/yellow]"
-                )
-                raise typer.Exit(1)
-            raise
-
-    def get_release_by_tag(self, tag: str) -> dict[str, Any]:
-        """Get a specific release by tag."""
-        try:
-            return self.api.repos.get_release_by_tag(tag)
-        except HTTP403ForbiddenError as e:
-            if "rate limit" in str(e).lower():
-                console.print("[red]GitHub API rate limit exceeded.[/red]")
-                console.print(
-                    "[yellow]Consider setting GH_RELEASE_GITHUB_TOKEN environment variable or using --token flag.[/yellow]"
-                )
-                raise typer.Exit(1)
-            raise
-
-    def find_matching_assets(
-        self,
-        assets: list[dict[str, Any]],
-        os_names: list[str],
-        arch: str,
-        pattern: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Find assets matching the current platform."""
-        matches = []
-
-        for asset in assets:
-            name = asset["name"].lower()
-
-            # Check if custom pattern matches
-            if pattern:
-                if pattern.lower() in name:
-                    matches.append(asset)
-                continue
-
-            # Check OS match
-            os_match = any(os_name in name for os_name in os_names)
-            if not os_match:
-                continue
-
-            # Check architecture match
-            arch_patterns = {
-                "amd64": ["amd64", "x86_64", "x64", "64bit"],
-                "arm64": ["arm64", "aarch64"],
-                "armv7": ["armv7", "arm32", "armhf"],
-                "386": ["386", "i386", "x86", "32bit"],
-            }
-
-            arch_match = False
-            if arch in arch_patterns:
-                arch_match = any(p in name for p in arch_patterns[arch])
-            else:
-                arch_match = arch in name
-
-            if os_match and arch_match:
-                matches.append(asset)
-
-        return matches
-
-    def download_file(self, url: str, dest: Path) -> None:
-        """Download a file with progress bar."""
-        with self.client.stream("GET", url) as response:
-            response.raise_for_status()
-            total = int(response.headers.get("content-length", 0))
-
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                DownloadColumn(),
-                console=console,
-            ) as progress:
-                task = progress.add_task(f"Downloading {dest.name}", total=total)
-
-                with open(dest, "wb") as f:
-                    for chunk in response.iter_bytes(chunk_size=8192):
-                        f.write(chunk)
-                        progress.update(task, advance=len(chunk))
-
-    def extract_binary(
-        self,
-        archive_path: Path,
-        extract_to: Path,
-        binary_name: str | None = None,
-    ) -> Path | None:
-        """Extract binary from archive with user selection if multiple files."""
-        extracted_files = []
-
-        def _extract_tar(tar: tarfile.TarFile):
-            tar.extractall(path=extract_to, filter="data")
-            return [
-                extract_to / member.name
-                for member in tar.getmembers()
-                if member.isfile()
-            ]
-
-        def _extract_zip(zip_ref: zipfile.ZipFile):
-            zip_ref.extractall(extract_to)
-            return [
-                extract_to / name
-                for name in zip_ref.namelist()
-                if not name.endswith("/")
-            ]
-
-        if archive_path.suffix == ".gz" and archive_path.stem.endswith(".tar"):
-            with tarfile.open(archive_path, "r:gz") as tar:
-                extracted_files = _extract_tar(tar)
-        elif archive_path.suffix == ".zip":
-            with zipfile.ZipFile(archive_path, "r") as zip_ref:
-                extracted_files = _extract_zip(zip_ref)
-        elif archive_path.suffix in [".tar", ".tgz"]:
-            mode = "r:gz" if archive_path.suffix == ".tgz" else "r"
-            with tarfile.open(archive_path, mode) as tar:
-                extracted_files = _extract_tar(tar)
-        else:
-            return archive_path  # Direct binary
-
-        if not extracted_files:
-            console.print("[red]No files found in archive[/red]")
-            return None
-
-        if binary_name:
-            for file in extracted_files:
-                if file.name == binary_name or file.name == f"{binary_name}.exe":
-                    # Ensure it's an actual executable
-                    if os.access(file, os.X_OK) or not file.suffix:
-                        return file
-
-        # Show files and prompt user to pick one
-        table = Table(title="Archive Contents")
-        table.add_column("Index", justify="right", style="cyan")
-        table.add_column("File Name", style="green")
-        table.add_column("Size", justify="right")
-
-        for idx, file in enumerate(extracted_files):
-            size_kb = file.stat().st_size / 1024
-            table.add_row(str(idx + 1), file.name, f"{size_kb:.1f} KB")
-
-        console.print(table)
+def strip_archive_ext(name: str) -> str:
+    for ext in [".tar.gz", ".tgz", ".zip", ".tar.xz", ".txz", ".tar.bz2", ".tbz2"]:
+        if name.endswith(ext):
+            return name[: -len(ext)]
+    return name.rsplit(".", 1)[0] if "." in name else name
 
 
-@app.command()
-def download(
-    repository: Annotated[
-        str, typer.Argument(help="GitHub repository in format owner/repo")
-    ],
-    tag: Annotated[
-        str | None, typer.Option("--tag", "-t", help="Specific release tag to download")
-    ] = None,
-    pattern: Annotated[
-        str | None,
-        typer.Option("--pattern", "-p", help="Custom pattern to match asset names"),
-    ] = None,
-    binary: Annotated[
-        str | None,
-        typer.Option(
-            "--binary", "-b", help="Name of the binary to extract from archive"
-        ),
-    ] = None,
-    output: Annotated[
-        Path | None, typer.Option("--output", "-o", help="Output path for the binary")
-    ] = None,
-    install_dir: Annotated[
-        Path, typer.Option("--install-dir", "-d", help="Installation directory")
-    ] = Path("~/local/bin"),
-    list_assets: Annotated[
-        bool,
-        typer.Option("--list", "-l", help="List available assets without downloading"),
-    ] = False,
-    token: Annotated[
-        str | None,
-        typer.Option(
-            "--token",
-            help="GitHub personal access token (or set GH_RELEASE_GITHUB_TOKEN env var)",
-        ),
-    ] = None,
-):
-    """Download binaries from GitHub releases.
+def is_checksum_bundle(name: str) -> bool:
+    return bool(CHECKSUM_BUNDLE_RE.match(name))
 
-    [bold]Examples:[/bold]
 
-        [green]# Download mise[/green]
-        gh-release jdx/mise
-
-        [green]# Download specific version[/green]
-        gh-release cli/cli --tag v2.40.0
-
-        [green]# Download with custom pattern[/green]
-        gh-release ethereum/go-ethereum --pattern linux-amd64
-
-        [green]# List available assets[/green]
-        gh-release rust-lang/rust --list
-
-        [green]# Use with GitHub token to avoid rate limits[/green]
-        export GH_RELEASE_GITHUB_TOKEN=ghp_xxxxx
-        gh-release owner/repo
+def parse_checksum_lines(text: str) -> dict[str, str]:
     """
-    # Parse repository
-    parts = repository.split("/")
-    if len(parts) != 2:
-        console.print("[red]Repository must be in format owner/repo[/red]")
-        raise typer.Exit(1)
+    Parses common checksum formats:
+    - 'HEX  filename' or 'HEX *filename'
+    - 'filename: HEX'
+    - lines that are just 'HEX  filename'
+    """
+    checksums: dict[str, str] = {}
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        # formats
+        m = re.match(r"^([0-9a-fA-F]{64})\s+\*?(.*)$", s)
+        if m:
+            checksums[m.group(2).strip()] = m.group(1).lower()
+            continue
+        m = re.match(r"^(.*?)[=:]\s*([0-9a-fA-F]{64})$", s)
+        if m:
+            checksums[m.group(1).strip()] = m.group(2).lower()
+            continue
+    return checksums
 
-    owner, repo = parts
 
-    # Get token from environment if not provided
-    if not token:
-        if CONFIG_FILE.exists():
-            saved = json.loads(CONFIG_FILE.read_text())
-            token = saved.get("token", token)
+def has_checksum_for(asset_name: str, checksum_names: set[str]) -> bool:
+    # per-file: foo.ext.sha256 or foo.ext.sha256sum
+    if (asset_name + ".sha256") in checksum_names or (
+        asset_name + ".sha256sum"
+    ) in checksum_names:
+        return True
+    # base without archive extension
+    base = strip_archive_ext(asset_name)
+    if (base + ".sha256") in checksum_names or (base + ".sha256sum") in checksum_names:
+        return True
+    return False
+
+
+# ------------------------------ GitHub client ------------------------------ #
+
+
+class GitHub:
+    def __init__(self, token: Optional[str] = None):
+        headers = {"Accept": "application/vnd.github+json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        self._client = httpx.Client(headers=headers, timeout=60)
+
+    def release(self, repo: str, tag: Optional[str]) -> ReleaseInfo:
+        if tag:
+            url = f"{GITHUB_API}/repos/{repo}/releases/tags/{tag}"
         else:
-            token = os.environ.get("GH_RELEASE_GITHUB_TOKEN")
-
-    with GitHubReleaseDownloader(owner, repo, token) as downloader:
-        # Get platform info
-        os_names, arch = downloader.get_platform_info()
-        console.print(f"Platform: {os_names[0]}-{arch}")
-
-        # Try to determine binary name
-        if not binary:
-            binary = repo
-
-        try:
-            # Get releases
-            if tag:
-                release = downloader.get_release_by_tag(tag)
-            else:
-                release = downloader.get_release()
-
-            if not release:
-                console.print("[red]No releases found[/red]")
-                raise typer.Exit(1)
-
-            # List mode
-            if list_assets:
-                console.print(f"\n[bold]Release: {release['tag_name']}[/bold]")
-                if release.get("name"):
-                    console.print(f"Name: {release['name']}")
-
-                table = Table(title="Assets")
-                table.add_column("Name", style="cyan")
-                table.add_column("Size", style="green")
-                table.add_column("Downloads", style="yellow")
-
-                for asset in release["assets"]:
-                    size_mb = asset["size"] / 1024 / 1024
-                    table.add_row(
-                        asset["name"],
-                        f"{size_mb:.1f} MB",
-                        str(asset["download_count"]),
-                    )
-
-                console.print(table)
-                return
-
-            # Find matching assets for the latest/specified release
-            version = release["tag_name"]
-            console.print(f"Release: [green]{version}[/green]")
-
-            # Find matching assets
-            matches = downloader.find_matching_assets(
-                release["assets"], os_names, arch, pattern
+            url = f"{GITHUB_API}/repos/{repo}/releases/latest"
+        r = self._client.get(url)
+        r.raise_for_status()
+        data = r.json()
+        assets = [
+            Asset(
+                name=a["name"],
+                url=a["browser_download_url"],
+                size=a.get("size", 0),
+                id=a["id"],
             )
+            for a in data.get("assets", [])
+        ]
+        return ReleaseInfo(
+            tag=data.get("tag_name") or tag or "unknown",
+            name=data.get("name") or "",
+            assets=assets,
+        )
 
-            if not matches:
-                console.print("[red]No matching assets found[/red]")
-                console.print("\nAvailable assets:")
-                for asset in release["assets"]:
-                    console.print(f"  - {asset['name']}")
-                raise typer.Exit(1)
+    def stream(self, url: str, headers: dict[str, str] | None = None) -> httpx.Response:
+        return self._client.build_request("GET", url, headers=headers or {})
 
-            # Select asset
-            if len(matches) == 1:
-                asset = matches[0]
-            else:
-                console.print("\nMultiple matching assets found:")
-                for i, match in enumerate(matches, 1):
-                    size_mb = match["size"] / 1024 / 1024
-                    console.print(f"{i}. {match['name']} ({size_mb:.1f} MB)")
 
-                choice = Prompt.ask(
-                    "Select asset",
-                    choices=[str(i) for i in range(1, len(matches) + 1)],
+# ----------------------------- Download machinery ----------------------------- #
+
+
+async def download_one(
+    client: httpx.AsyncClient,
+    url: str,
+    dest: Path,
+    expected_size: int | None = None,
+    etag: str | None = None,
+    progress: Optional[Progress] = None,
+    task_id: Optional[int] = None,
+) -> None:
+    """
+    Resumable downloader: appends to *.part and renames on completion.
+    Uses Range + If-Range when possible.
+    """
+    part = dest.with_suffix(dest.suffix + ".part")
+    headers = {}
+    pos = 0
+    if part.exists():
+        pos = part.stat().st_size
+        headers["Range"] = f"bytes={pos}-"
+        if etag:
+            headers["If-Range"] = etag
+
+    async with client.stream("GET", url, headers=headers, follow_redirects=True) as r:
+        r.raise_for_status()
+        mode = "ab" if pos > 0 else "wb"
+        total = None
+        # compute total if known (for progress bar)
+        content_length = r.headers.get("Content-Length")
+        if content_length is not None:
+            total = int(content_length) + pos
+        elif expected_size:
+            total = expected_size
+        if progress and task_id is not None and total is not None:
+            progress.update(task_id, total=total, completed=pos)
+
+        with open(part, mode) as f:
+            async for chunk in r.aiter_bytes():
+                f.write(chunk)
+                if progress and task_id is not None:
+                    progress.update(task_id, advance=len(chunk))
+
+    # Verify size if available
+    if expected_size is not None and part.stat().st_size != expected_size:
+        # Some servers gzip on the fly; don't hard fail here. We'll rename anyway.
+        pass
+
+    part.rename(dest)
+
+
+async def download_many(
+    assets: list[Asset],
+    dest_dir: Path,
+    parallel: int = 4,
+    verify: bool = False,
+) -> None:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # First, separate checksum assets vs normal assets so we can download checksums first
+    checksum_assets = [
+        a
+        for a in assets
+        if is_checksum_bundle(a.name) or a.name.endswith((".sha256", ".sha256sum"))
+    ]
+    data_assets = [a for a in assets if a not in checksum_assets]
+
+    # Run downloads with a pool
+    limits = httpx.Limits(max_connections=parallel)
+    async with httpx.AsyncClient(limits=limits, timeout=60) as client:
+        # Download checksums first
+        with Progress(
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            transient=True,
+            console=console,
+        ) as progress:
+            tasks = []
+            for a in checksum_assets:
+                dest = dest_dir / a.name
+                t = progress.add_task(f"Checksum {a.name}", total=a.size or None)
+                tasks.append(
+                    download_one(client, a.url, dest, a.size, None, progress, t)
                 )
-                asset = matches[int(choice) - 1]
+            await asyncio.gather(*tasks)
 
-            console.print(f"Selected: [cyan]{asset['name']}[/cyan]")
+        # Build checksum map (name -> hash)
+        checksum_map: dict[str, str] = {}
+        for a in checksum_assets:
+            p = dest_dir / a.name
+            if not p.exists():
+                continue
+            if a.name.endswith((".sha256", ".sha256sum")):
+                try:
+                    checksum_map[strip_archive_ext(a.name)] = (
+                        p.read_text().strip().split()[0]
+                    ).lower()
+                except Exception:
+                    pass
+            elif is_checksum_bundle(a.name):
+                try:
+                    parsed = parse_checksum_lines(p.read_text())
+                    checksum_map.update(parsed)
+                except Exception:
+                    pass
 
-            # Determine installation path
-            install_path = install_dir.expanduser()
-            install_path.mkdir(parents=True, exist_ok=True)
+        # Download data assets
+        with Progress(
+            TextColumn("[bold green]{task.description}"),
+            BarColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            transient=False,
+            console=console,
+        ) as progress:
+            tasks = []
+            for a in data_assets:
+                dest = dest_dir / a.name
+                t = progress.add_task(a.name, total=a.size or None)
+                tasks.append(
+                    download_one(client, a.url, dest, a.size, None, progress, t)
+                )
+            await asyncio.gather(*tasks)
 
-            if output:
-                final_path = output.expanduser()
-            else:
-                final_path = install_path / binary
-
-            # Check if file exists
-            if final_path.exists():
-                if not Confirm.ask(f"{final_path} already exists. Overwrite?"):
-                    console.print("[yellow]Aborted[/yellow]")
-                    raise typer.Exit(0)
-
-            # Download
-            download_url = asset["browser_download_url"]
-
-            with tempfile.TemporaryDirectory() as tmpdir:
-                tmp_path = Path(tmpdir)
-                download_path = tmp_path / asset["name"]
-
-                console.print(f"Downloading from: {download_url}")
-                downloader.download_file(download_url, download_path)
-
-                # Extract binary if needed
-                console.print("Processing download...")
-                binary_path = downloader.extract_binary(download_path, tmp_path, binary)
-
-                if not binary_path:
-                    console.print("[red]Could not find binary in archive[/red]")
-                    raise typer.Exit(1)
-
-                # Move to final location
-                if final_path.exists():
-                    final_path.unlink()
-
-                if binary_path != download_path:
-                    binary_path.rename(final_path)
+    # Optional verification
+    if verify and checksum_map:
+        failures = 0
+        for a in data_assets:
+            p = dest_dir / a.name
+            if not p.exists():
+                continue
+            # direct match
+            expected = checksum_map.get(a.name)
+            # base-name match
+            expected = expected or checksum_map.get(strip_archive_ext(a.name))
+            if expected:
+                actual = sha256sum(p)
+                if actual != expected.lower():
+                    failures += 1
+                    console.print(
+                        f"[red]Checksum FAILED[/red] {a.name} expected {expected} got {actual}"
+                    )
                 else:
-                    # Direct binary download
-                    download_path.rename(final_path)
+                    console.print(f"[green]Checksum OK[/green] {a.name}")
+        if failures:
+            raise SystemExit(2)
 
-                # Make executable
-                final_path.chmod(final_path.stat().st_mode | stat.S_IEXEC)
 
-            console.print(f"[green]✓ Successfully installed to {final_path}[/green]")
+# ------------------------------ Asset filtering ------------------------------ #
 
-            # Check PATH
-            if str(install_path) not in os.environ.get("PATH", ""):
-                console.print(
-                    f"\n[yellow]Note: {install_path} is not in your PATH.[/yellow]"
-                )
-                console.print(f'Add to PATH with: export PATH="{install_path}:$PATH"')
 
-        except Exception as e:
-            if "404" in str(e):
-                console.print(
-                    f"[red]Repository or release not found: {owner}/{repo}[/red]"
-                )
-                if tag:
-                    console.print(f"[red]Tag '{tag}' may not exist[/red]")
-            else:
-                console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
+def filter_assets(
+    assets: Iterable[Asset],
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+    regex: str | None = None,
+    match_platform: bool = False,
+) -> list[Asset]:
+    items = list(assets)
+
+    def contains_any(name: str, needles: list[str]) -> bool:
+        lname = name.lower()
+        return any(n.lower() in lname for n in needles)
+
+    if match_platform:
+        terms = current_platform_terms()
+        items = [a for a in items if contains_any(a.name, terms)]
+
+    if include:
+        items = [a for a in items if contains_any(a.name, include)]
+
+    if exclude:
+        items = [a for a in items if not contains_any(a.name, exclude)]
+
+    if regex:
+        r = re.compile(regex, re.IGNORECASE)
+        items = [a for a in items if r.search(a.name)]
+
+    return items
+
+
+# ---------------------------------- CLI ---------------------------------- #
 
 
 @app.command()
-def login(
-    launch: bool = typer.Option(
-        True,
-        "--launch/--no-launch",
-        help="Automatically launch the verification URL in the browser.",
+def main(
+    repo: str = typer.Option(
+        ..., help="GitHub repo in 'owner/name' form (e.g. cli/cli)"
+    ),
+    tag: Optional[str] = typer.Option(None, help="Release tag (default: latest)"),
+    dir: Path = typer.Option(Path("."), help="Destination directory"),
+    list: bool = typer.Option(
+        False, "--list", help="List matching assets without downloading"
+    ),
+    match_platform: bool = typer.Option(
+        False, help="Only select assets matching current OS/arch"
+    ),
+    include: Optional[str] = typer.Option(
+        None, help="Comma-separated substrings that must appear"
+    ),
+    exclude: Optional[str] = typer.Option(
+        None, help="Comma-separated substrings to exclude"
+    ),
+    regex: Optional[str] = typer.Option(
+        None, help="Regex filter applied to asset names"
+    ),
+    parallel: int = typer.Option(4, help="Max parallel downloads"),
+    verify: bool = typer.Option(
+        False, help="Verify assets if checksum files are present"
     ),
 ):
     """
-    Authenticate via GitHub Device Flow and save the access token.
+    Download assets from a GitHub release.
+
+    By default, fetches the *latest* release unless --tag is given.
+    Filters can be combined. When --match-platform is on, OS/arch heuristics are applied.
     """
-    if CONFIG_FILE.exists():
-        console.print(f"[yellow]Token already exists at {CONFIG_FILE}.[/yellow]")
-        if not Confirm.ask("Do you want to overwrite it?"):
-            console.print("[yellow]Aborted login, file already exists.[/yellow]")
-            raise typer.Exit(0)
+    token = get_token()
+    gh = GitHub(token=token)
+    info = gh.release(repo, tag)
 
-    device_code_url = "https://github.com/login/device/code"
-    token_url = "https://github.com/login/oauth/access_token"
-    headers = {"Accept": "application/json"}
+    include_list = [s for s in (include or "").split(",") if s] or None
+    exclude_list = [s for s in (exclude or "").split(",") if s] or None
 
-    # Step 1: Get device/user codes
-    response = httpx.post(
-        device_code_url,
-        data={"client_id": GITHUB_CLIENT_ID},
-        headers=headers,
-    )
-    response.raise_for_status()
-    data = response.json()
-
-    user_code = data["user_code"]
-    verification_uri = data["verification_uri"]
-    device_code = data["device_code"]
-    interval = data.get("interval", 5)
-
-    console.print(
-        f"\n[green]Visit {verification_uri}\nEnter the code:[/green] [bold]{user_code}[/bold]"
+    selected = filter_assets(
+        info.assets,
+        include=include_list,
+        exclude=exclude_list,
+        regex=regex,
+        match_platform=match_platform,
     )
 
-    if launch:
-        time.sleep(1)
-        typer.launch(verification_uri)
+    if not selected:
+        console.print("[yellow]No assets matched your filters.[/yellow]")
+        raise SystemExit(1)
 
-    # Step 2: Poll for token
-    with console.status("Waiting for authorization..."):
-        while True:
-            time.sleep(interval)
-            poll_resp = httpx.post(
-                token_url,
-                data={
-                    "client_id": GITHUB_CLIENT_ID,
-                    "device_code": device_code,
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                },
-                headers=headers,
-            )
+    # Pretty table
+    table = Table(title=f"{repo} – {info.name or info.tag} ({info.tag})")
+    table.add_column("Asset", overflow="fold")
+    table.add_column("Size", justify="right")
+    table.add_column("URL", overflow="fold")
+    for a in selected:
+        table.add_row(a.name, human_size(a.size or 0), a.url)
+    console.print(table)
 
-            result = poll_resp.json()
-            if "error" in result:
-                if result["error"] in ("authorization_pending", "slow_down"):
-                    continue
-                else:
-                    console.print(
-                        f"[red]Error: {result.get('error_description', result['error'])}[/red]"
-                    )
-                    raise typer.Exit(1)
-            else:
-                token = result["access_token"]
-                break
+    if list:
+        return
 
-    # Save token
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps({"token": token}, indent=2))
+    # Proceed with download
+    console.print(f"Downloading {len(selected)} asset(s) to [bold]{dir}[/bold] ...")
+    asyncio.run(download_many(selected, dir, clamp(parallel, 1, 16), verify))
 
-    console.print(f"[green]✓ Logged in. Token saved to {CONFIG_FILE}[/green]")
+    console.print("[green]Done.[/green]")
 
 
 if __name__ == "__main__":
-    app()
+    raise SystemExit(app())
