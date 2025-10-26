@@ -30,15 +30,6 @@ uv run gh-release.py --repo junegunn/fzf --regex "(linux|darwin).*(amd64|arm64)"
 
 # Verify checksums if checksum files exist
 uv run gh-release.py --repo stedolan/jq --verify
-
-Notes
------
-- GitHub token: read from $GITHUB_TOKEN or $GH_TOKEN if set (higher rate limits).
-- Resumes partial downloads into *.part files. If the server supports range
-  requests, it continues; otherwise it starts fresh.
-- Checksums: the script *detects* checksum assets, downloads them first, and
-  uses them to verify relevant assets when --verify is on.
-
 """
 
 from __future__ import annotations
