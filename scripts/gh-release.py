@@ -11,7 +11,7 @@
 # ///
 """
 gh-release: Download GitHub release assets with smart platform matching,
-parallel downloads, checksum detection, and resumable transfers.
+checksum detection, and resumable transfers.
 
 Usage
 -----
@@ -21,8 +21,8 @@ uv run gh-release.py --repo cli/cli --list
 # Download assets that match your current platform only
 uv run gh-release.py --repo sharkdp/bat --match-platform --dir ./bin
 
-# Download all release assets for a specific tag, with 8 workers
-uv run gh-release.py --repo BurntSushi/ripgrep --tag 14.1.0 --parallel 8
+# Download all release assets for a specific tag
+uv run gh-release.py --repo BurntSushi/ripgrep --tag 14.1.0
 
 # Filter by simple substring(s) or regex
 uv run gh-release.py --repo junegunn/fzf --include linux,amd64 --exclude "musl|arm"
@@ -314,7 +314,6 @@ async def download_one(
 async def download_many(
     assets: list[Asset],
     dest_dir: Path,
-    parallel: int = 4,
 ) -> None:
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -326,9 +325,7 @@ async def download_many(
     ]
     data_assets = [a for a in assets if a not in checksum_assets]
 
-    # Run downloads with a pool
-    limits = httpx.Limits(max_connections=parallel)
-    async with httpx.AsyncClient(limits=limits, timeout=60) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         # Download checksums first
         with Progress(
             TextColumn("[bold blue]{task.description}"),
@@ -469,7 +466,6 @@ def main(
     regex: Optional[str] = typer.Option(
         None, help="Regex filter applied to asset names"
     ),
-    parallel: int = typer.Option((os.cpu_count() or 4), help="Max parallel downloads"),
 ):
     """
     Download assets from a GitHub release.
@@ -518,7 +514,7 @@ def main(
 
     # Proceed with download
     console.print(f"Downloading {len(selected)} asset(s) to [bold]{dir}[/bold] ...")
-    asyncio.run(download_many(selected, dir, clamp(parallel, 1, 32)))
+    asyncio.run(download_many(selected, dir))
 
     console.print("[green]Done.[/green]")
 
