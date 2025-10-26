@@ -453,7 +453,7 @@ def main(
         ..., help="GitHub repo in 'owner/name' form (e.g. cli/cli)"
     ),
     tag: Optional[str] = typer.Option(None, help="Release tag (default: latest)"),
-    dir: Path = typer.Option(Path("."), help="Destination directory"),
+    dir: Path | None = typer.Option(None, help="Destination directory"),
     list: bool = typer.Option(
         False, "--list", help="List matching assets without downloading"
     ),
@@ -477,9 +477,17 @@ def main(
     By default, fetches the *latest* release unless --tag is given.
     Filters can be combined. When --match-platform is on, OS/arch heuristics are applied.
     """
+
     token = get_token()
     gh = GitHub(token=token)
     info = gh.release(repo, tag)
+
+    if dir is None:
+        owner, repo_name = repo.split("/", 1)
+        resolved_tag = info.tag or tag or "latest"
+        # Make a safe folder name (avoid spaces and weird chars)
+        safe_tag = re.sub(r"[^A-Za-z0-9._-]+", "_", resolved_tag)
+        dir = Path(f"{owner}-{repo_name}-{safe_tag}")
 
     include_list = [s for s in (include or "").split(",") if s] or None
     exclude_list = [s for s in (exclude or "").split(",") if s] or None
