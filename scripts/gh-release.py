@@ -27,9 +27,6 @@ uv run gh-release.py --repo BurntSushi/ripgrep --tag 14.1.0
 # Filter by simple substring(s) or regex
 uv run gh-release.py --repo junegunn/fzf --include linux,amd64 --exclude "musl|arm"
 uv run gh-release.py --repo junegunn/fzf --regex "(linux|darwin).*(amd64|arm64)"
-
-# Verify checksums if checksum files exist
-uv run gh-release.py --repo stedolan/jq --verify
 """
 
 from __future__ import annotations
