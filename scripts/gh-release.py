@@ -469,7 +469,7 @@ def main(
     regex: Optional[str] = typer.Option(
         None, help="Regex filter applied to asset names"
     ),
-    parallel: int = typer.Option(4, help="Max parallel downloads"),
+    parallel: int = typer.Option((os.cpu_count() or 4), help="Max parallel downloads"),
 ):
     """
     Download assets from a GitHub release.
