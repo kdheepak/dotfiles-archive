@@ -5,6 +5,7 @@
 # dependencies = [
 #     "rich",
 #     "typer",
+#     "litellm",
 # ]
 # ///
 
@@ -12,27 +13,53 @@ from __future__ import annotations
 
 import os
 import stat
-from pathlib import Path
+import sys
 import textwrap
+from pathlib import Path
+from typing import Optional
+
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Confirm
 
 console = Console()
-app = typer.Typer(add_completion=False, help="Create a Python script template using uv, Rich, and Typer.")
+app = typer.Typer(
+    add_completion=False,
+    help="Generate Python scripts using uv + Rich + Typer, with GitHub Copilot via LiteLLM (always fall back)."
+)
 
+# ------------------------
+# Utilities
+# ------------------------
 
 def _ensure_py_suffix(name: str) -> str:
     return name if name.endswith(".py") else f"{name}.py"
 
 
-def _render_template(script_name: str, description: str) -> str:
-    """
-    Build the script text. Curly braces that must survive into the generated file
-    are doubled (e.g., {{name}} in the f-string).
-    """
+def _write_file(path: Path, content: str, force: bool) -> None:
+    if path.exists() and not force:
+        raise FileExistsError(f"Refusing to overwrite existing file: {path}")
+    path.write_text(content, encoding="utf-8")
+    mode = path.stat().st_mode
+    path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _strip_code_fences(s: str) -> str:
+    s = s.strip()
+    if s.startswith("```"):
+        first_newline = s.find("\n")
+        if first_newline != -1:
+            s = s[first_newline + 1 :]
+    if s.endswith("```"):
+        s = s[:-3]
+    return s.strip()
+
+
+def _local_template(script_name: str, description: str) -> str:
+    """Non-AI fallback template (guaranteed)."""
     return textwrap.dedent(
-        """\
+        f"""\
         #!/usr/bin/env -S uv run --script
         # -*- coding: utf-8 -*-
         # /// script
@@ -65,43 +92,151 @@ def _render_template(script_name: str, description: str) -> str:
         if __name__ == "__main__":
             app()
         """
-    ).format(script_name=script_name, description=description)
+    )
+
+# ------------------------
+# GitHub Copilot via LiteLLM
+# ------------------------
+
+def _ensure_copilot_model(model: str | None) -> str:
+    # Default to a Copilot model; allow short names and auto-prefix.
+    default_model = "github_copilot/gpt-4o-mini"
+    if not model:
+        return default_model
+    return model if model.startswith("github_copilot/") else f"github_copilot/{model}"
 
 
-def _write_file(path: Path, content: str, force: bool) -> None:
-    if path.exists() and not force:
-        raise FileExistsError(f"Refusing to overwrite existing file: {path}")
-    path.write_text(content, encoding="utf-8")
+def _gen_with_copilot(
+    *,
+    description: str,
+    script_name: str,
+    model: str,
+    api_key: Optional[str],
+    temperature: float,
+    max_tokens: int,
+    system_prompt: Optional[str] = None,
+) -> str:
+    try:
+        from litellm import completion
+    except Exception as e:
+        raise RuntimeError(f"LiteLLM import failed: {e}")
 
-    # Make executable (chmod +x)
-    mode = path.stat().st_mode
-    path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # Copilot auth: allow flag or env; keep env var explicit.
+    if api_key:
+        os.environ.setdefault("GITHUB_COPILOT_API_KEY", api_key)
 
+    sys_prompt = system_prompt or textwrap.dedent(
+        """\
+        You output COMPLETE, runnable Python CLI scripts that:
+        - Start with: #!/usr/bin/env -S uv run --script
+        - Include a # /// script metadata block with dependencies, e.g.:
+            ```
+            # /// script
+            # requires-python = ">=3.12"
+            # dependencies = [
+            #     "rich",
+            #     "typer",
+            # ]
+            # ///
+            ```
+        - Use Typer for CLI and Rich for console output
+        - Are a single-file tool shaped from the description
+        - Output ONLY code, no markdown fences or commentary.
+
+
+        """
+    )
+
+    user_prompt = textwrap.dedent(
+        f"""\
+        Create a Python CLI named "{script_name}" from this description:
+
+        {description}
+
+        Requirements:
+        - Provide the full file contents.
+        - Include uv header and script metadata (rich, typer).
+        - Import and use typer + rich properly.
+        - Keep it clean, idiomatic, runnable as-is.
+        - Do NOT include markdown fences.
+        """
+    )
+
+    headers = {
+        "editor-version": "vscode/1.85.1",
+        "Copilot-Integration-Id": "vscode-chat",
+    }
+
+    resp = completion(
+        model=model,
+        messages=[
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=temperature,
+        max_tokens=max_tokens,
+        extra_headers=headers,
+    )
+
+    content = resp.choices[0].message["content"]  # OpenAI-style object
+    return _strip_code_fences(content)
+
+# ------------------------
+# CLI
+# ------------------------
 
 @app.command()
 def new(
     name: str = typer.Argument(..., help="Name of the script to create (with or without .py)"),
     dir: Path = typer.Option(".", "--dir", help="Directory to place the file in"),
-    description: str = typer.Option("CLI skeleton using Rich + Typer", "--description", help="Description embedded in the template"),
+    description: str = typer.Option("CLI skeleton using Rich + Typer", "--description", "-d", help="High-level description of what to build"),
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite if the file already exists"),
-    print_only: bool = typer.Option(False, "--print", help="Print the template instead of writing a file"),
+    print_only: bool = typer.Option(False, "--print", help="Print the generated code instead of writing a file"),
+    preview: bool = typer.Option(False, "--preview", help="Show a confirmation panel before writing the file"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="GitHub Copilot model (auto-prefixed to github_copilot/ if missing)"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="GitHub Copilot API key (defaults to GITHUB_COPILOT_API_KEY env var)", envvar="GITHUB_COPILOT_API_KEY"),
+    temperature: float = typer.Option(0.2, "--temperature", min=0.0, max=2.0),
+    max_tokens: int = typer.Option(3000, "--max-tokens", help="Generation token limit"),
 ) -> None:
     """
-    Generate a new Python script that runs with `uv run` and includes Rich + Typer.
+    Generate a new Python script using GitHub Copilot (via LiteLLM) from --description.
+    This command NEVER fails hard: on any error, it falls back to a local template.
     """
     filename = _ensure_py_suffix(name)
     script_name = Path(filename).stem
-
-    content = _render_template(script_name, description)
-
-    if print_only:
-        console.print(Panel("Template output (not writing a file due to --print):", border_style="yellow"))
-        console.print(content)
-        return
-
     dir.mkdir(parents=True, exist_ok=True)
     path = dir / filename
 
+    copilot_model = _ensure_copilot_model(model)
+
+    # Try AI generation; always fall back on any error
+    try:
+        content = _gen_with_copilot(
+            description=description,
+            script_name=script_name,
+            model=copilot_model,
+            api_key=api_key,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    except Exception as e:
+        console.print(Panel.fit(f"[red]AI generation failed:[/red] {e}\nFalling back to local template.", border_style="red"))
+        content = _local_template(script_name, description)
+
+    # Optional preview
+    if preview:
+        console.print(Panel("Preview of generated code:", border_style="yellow", title="Preview"))
+        console.print(content)
+        if not Confirm.ask("Write this file?", default=True):
+            console.print("[yellow]Aborted by user.[/yellow]")
+            raise typer.Exit(code=0)
+
+    if print_only:
+        console.print(Panel("Printing generated code (no file written due to --print):", border_style="yellow"))
+        console.print(content)
+        raise typer.Exit(code=0)
+
+    # Write to disk
     try:
         _write_file(path, content, force)
     except FileExistsError as e:
@@ -116,4 +251,3 @@ def new(
 
 if __name__ == "__main__":
     app()
-
