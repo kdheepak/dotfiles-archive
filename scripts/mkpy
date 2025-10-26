@@ -1,0 +1,119 @@
+#!/usr/bin/env -S uv run --script
+# -*- coding: utf-8 -*-
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "rich",
+#     "typer",
+# ]
+# ///
+
+from __future__ import annotations
+
+import os
+import stat
+from pathlib import Path
+import textwrap
+import typer
+from rich.console import Console
+from rich.panel import Panel
+
+console = Console()
+app = typer.Typer(add_completion=False, help="Create a Python script template using uv, Rich, and Typer.")
+
+
+def _ensure_py_suffix(name: str) -> str:
+    return name if name.endswith(".py") else f"{name}.py"
+
+
+def _render_template(script_name: str, description: str) -> str:
+    """
+    Build the script text. Curly braces that must survive into the generated file
+    are doubled (e.g., {{name}} in the f-string).
+    """
+    return textwrap.dedent(
+        """\
+        #!/usr/bin/env -S uv run --script
+        # -*- coding: utf-8 -*-
+        # /// script
+        # requires-python = ">=3.12"
+        # dependencies = [
+        #     "rich",
+        #     "typer",
+        # ]
+        # ///
+
+        from __future__ import annotations
+
+        import typer
+        from rich.console import Console
+        from rich.panel import Panel
+
+        app = typer.Typer(add_completion=False, help="{description}")
+        console = Console()
+
+        @app.command()
+        def main(
+            name: str = typer.Argument("world", help="Who to greet"),
+            shout: bool = typer.Option(False, "--shout", help="Uppercase the greeting"),
+        ) -> None:
+            text = f"Hello, {{name}}!"
+            if shout:
+                text = text.upper()
+            console.print(Panel(text, title="{script_name}", border_style="green"))
+
+        if __name__ == "__main__":
+            app()
+        """
+    ).format(script_name=script_name, description=description)
+
+
+def _write_file(path: Path, content: str, force: bool) -> None:
+    if path.exists() and not force:
+        raise FileExistsError(f"Refusing to overwrite existing file: {path}")
+    path.write_text(content, encoding="utf-8")
+
+    # Make executable (chmod +x)
+    mode = path.stat().st_mode
+    path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+@app.command()
+def new(
+    name: str = typer.Argument(..., help="Name of the script to create (with or without .py)"),
+    dir: Path = typer.Option(".", "--dir", help="Directory to place the file in"),
+    description: str = typer.Option("CLI skeleton using Rich + Typer", "--description", help="Description embedded in the template"),
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite if the file already exists"),
+    print_only: bool = typer.Option(False, "--print", help="Print the template instead of writing a file"),
+) -> None:
+    """
+    Generate a new Python script that runs with `uv run` and includes Rich + Typer.
+    """
+    filename = _ensure_py_suffix(name)
+    script_name = Path(filename).stem
+
+    content = _render_template(script_name, description)
+
+    if print_only:
+        console.print(Panel("Template output (not writing a file due to --print):", border_style="yellow"))
+        console.print(content)
+        return
+
+    dir.mkdir(parents=True, exist_ok=True)
+    path = dir / filename
+
+    try:
+        _write_file(path, content, force)
+    except FileExistsError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+
+    rel = os.path.relpath(path, start=".")
+    console.print(Panel(f"Created [bold]{rel}[/bold] and made it executable.", title="Success", border_style="green"))
+    console.print("Run it directly:")
+    console.print(f"  [dim]./[/dim]{rel} --help")
+
+
+if __name__ == "__main__":
+    app()
+
