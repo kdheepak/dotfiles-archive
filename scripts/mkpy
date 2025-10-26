@@ -190,7 +190,6 @@ def new(
 ) -> None:
     """
     Generate a new Python script using GitHub Copilot (via LiteLLM) from --description.
-    This command NEVER fails hard: on any error, it falls back to a local template.
     """
     filename = _ensure_py_suffix(name)
     script_name = Path(filename).stem
