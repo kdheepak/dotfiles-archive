@@ -21,7 +21,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 
-console = Console()
+console = Console(color_system="truecolor", force_terminal=True)
 WIDTH = shutil.get_terminal_size((100, 24)).columns
 
 # ---------- OSC helpers ----------
@@ -131,24 +131,6 @@ def colored_hex_text(hexval: str) -> Text:
 
 
 # ---------- Sections ----------
-def _contrast(hex_or_none: str, idx: int) -> str:
-    """
-    Return 'black' or 'white' for readable text on the given background.
-    Prefers hex (if OSC 4 returned it). Falls back to a heuristic per ANSI index.
-    """
-    if (
-        isinstance(hex_or_none, str)
-        and hex_or_none.startswith("#")
-        and len(hex_or_none) == 7
-    ):
-        r = int(hex_or_none[1:3], 16)
-        g = int(hex_or_none[3:5], 16)
-        b = int(hex_or_none[5:7], 16)
-        luma = 0.299 * r + 0.587 * g + 0.114 * b
-        return "black" if luma >= 140 else "white"
-    # sensible fallback for typical palettes
-    dark_bg = {0, 1, 4, 5, 6, 8, 9, 12, 13, 14}
-    return "white" if idx in dark_bg else "black"
 
 
 def section_ansi_0_15(pal_hex: dict) -> Panel:
@@ -159,9 +141,9 @@ def section_ansi_0_15(pal_hex: dict) -> Panel:
         t = Text()
         sw = Text(f" {hx or '—'} ")
         if isinstance(hx, str) and hx.startswith("#") and len(hx) == 7:
-            sw.stylize(f"{_contrast(hx, idx)} on {hx}")  # truecolor bg
+            sw.stylize(f"on {hx}")  # truecolor bg
         else:
-            sw.stylize(f"{_contrast(hx, idx)} on color({idx})")  # 256-color fallback
+            sw.stylize(f"on color({idx})")  # 256-color fallback
         t.append_text(sw)
         return t
 
