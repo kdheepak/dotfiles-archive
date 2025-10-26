@@ -315,7 +315,6 @@ async def download_many(
     assets: list[Asset],
     dest_dir: Path,
     parallel: int = 4,
-    verify: bool = False,
 ) -> None:
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -389,7 +388,7 @@ async def download_many(
             await asyncio.gather(*tasks)
 
     # Optional verification
-    if verify and checksum_map:
+    if checksum_map:
         failures = 0
         for a in data_assets:
             p = dest_dir / a.name
@@ -471,9 +470,6 @@ def main(
         None, help="Regex filter applied to asset names"
     ),
     parallel: int = typer.Option(4, help="Max parallel downloads"),
-    verify: bool = typer.Option(
-        False, help="Verify assets if checksum files are present"
-    ),
 ):
     """
     Download assets from a GitHub release.
@@ -514,7 +510,7 @@ def main(
 
     # Proceed with download
     console.print(f"Downloading {len(selected)} asset(s) to [bold]{dir}[/bold] ...")
-    asyncio.run(download_many(selected, dir, clamp(parallel, 1, 16), verify))
+    asyncio.run(download_many(selected, dir, clamp(parallel, 1, 16)))
 
     console.print("[green]Done.[/green]")
 
