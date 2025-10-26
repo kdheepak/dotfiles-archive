@@ -518,7 +518,7 @@ def main(
 
     # Proceed with download
     console.print(f"Downloading {len(selected)} asset(s) to [bold]{dir}[/bold] ...")
-    asyncio.run(download_many(selected, dir, clamp(parallel, 1, 16)))
+    asyncio.run(download_many(selected, dir, clamp(parallel, 1, 32)))
 
     console.print("[green]Done.[/green]")
 
