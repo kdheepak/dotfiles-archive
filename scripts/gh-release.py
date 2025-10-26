@@ -496,13 +496,16 @@ def main(
         console.print("[yellow]No assets matched your filters.[/yellow]")
         raise SystemExit(1)
 
-    # Pretty table
+    # Pretty table: show ALL assets, mark selected ones with ✓
+    selected_ids = {a.id for a in selected}
     table = Table(title=f"{repo} – {info.name or info.tag} ({info.tag})")
+    table.add_column("✓", justify="center", width=2)
     table.add_column("Asset", overflow="fold")
     table.add_column("Size", justify="right")
     table.add_column("URL", overflow="fold")
-    for a in selected:
-        table.add_row(a.name, human_size(a.size or 0), a.url)
+    for a in info.assets:
+        mark = "✓" if a.id in selected_ids else ""
+        table.add_row(mark, a.name, human_size(a.size or 0), a.url)
     console.print(table)
 
     if list:
