@@ -42,7 +42,6 @@ from typing import Iterable, Optional
 
 import httpx
 import typer
-from platformdirs import user_cache_dir
 from rich.console import Console
 from rich.progress import (
     Progress,
@@ -87,10 +86,6 @@ def sha256sum(path: Path) -> str:
 
 def get_token() -> Optional[str]:
     return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-
-
-def cache_dir() -> Path:
-    return Path(user_cache_dir(appname="gh-release-combined", appauthor=False))
 
 
 @dataclass(slots=True)
