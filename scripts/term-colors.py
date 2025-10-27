@@ -16,7 +16,6 @@ import select
 import time
 import shutil
 from rich.console import Console, Group
-from rich.columns import Columns
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
@@ -268,12 +267,7 @@ def main():
     s3 = section_cube()  # always full cube
     s4 = section_gray()
 
-    if WIDTH >= 120:
-        top = Columns([s1, s2], equal=True, expand=True)
-        bottom = Columns([s3, s4], equal=True, expand=True)
-        console.print(Group(top, bottom))
-    else:
-        console.print(Group(s1, s2, s3, s4))
+    console.print(Group(s1, s2, s3, s4))
 
 
 if __name__ == "__main__":
