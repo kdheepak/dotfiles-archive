@@ -221,6 +221,7 @@ def pick(
             out.append(glyph)
 
     sys.stdout.write("\n".join(out))
+    sys.stdout.write("\n")
 
 
 if __name__ == "__main__":
