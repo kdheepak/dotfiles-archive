@@ -336,7 +336,7 @@ def pick(
     ),
     multi: bool = typer.Option(True, "--multi/--no-multi", help="Enable multi-select."),
     scope: Literal["emoji", "unicode", "both"] = typer.Option(
-        "emoji",
+        "both",
         "--scope",
         help="Search set: 'emoji' (fast), 'unicode' (all assigned codepoints), or 'both'.",
     ),
