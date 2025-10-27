@@ -307,12 +307,10 @@ def _build_rows(
     plane: Literal["bmp", "all"],
 ) -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
-    if scope in ("emoji", "both"):
-        rows.extend(_emoji_rows())
     if scope in ("unicode", "both"):
         rows.extend(_unicode_rows(plane))
-    # Sort once globally so "both" merges nicely
-    rows.sort(key=lambda r: r[1].lower())
+    if scope in ("emoji", "both"):
+        rows.extend(_emoji_rows())
     return rows
 
 
