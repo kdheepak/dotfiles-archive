@@ -9,7 +9,7 @@
 # ]
 # ///
 """
-emoji-fzf: fuzzy-search all emojis with a Rich preview
+emoji-fzf: fuzzy-search emojis or all Unicode characters with a Rich preview
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import unicodedata
+from typing import Iterable, Literal
 
 import typer
 from rich.console import Console
@@ -37,6 +38,39 @@ SKIN_MODS = [
     "\U0001f3fe",  # medium-dark
     "\U0001f3ff",  # dark
 ]
+
+CATEGORY_NAMES = {
+    "Lu": "Letter, Uppercase",
+    "Ll": "Letter, Lowercase",
+    "Lt": "Letter, Titlecase",
+    "Lm": "Letter, Modifier",
+    "Lo": "Letter, Other",
+    "Mn": "Mark, Nonspacing",
+    "Mc": "Mark, Spacing Combining",
+    "Me": "Mark, Enclosing",
+    "Nd": "Number, Decimal",
+    "Nl": "Number, Letter",
+    "No": "Number, Other",
+    "Pc": "Punctuation, Connector",
+    "Pd": "Punctuation, Dash",
+    "Ps": "Punctuation, Open",
+    "Pe": "Punctuation, Close",
+    "Pi": "Punctuation, Initial Quote",
+    "Pf": "Punctuation, Final Quote",
+    "Po": "Punctuation, Other",
+    "Sm": "Symbol, Math",
+    "Sc": "Symbol, Currency",
+    "Sk": "Symbol, Modifier",
+    "So": "Symbol, Other",
+    "Zs": "Separator, Space",
+    "Zl": "Separator, Line",
+    "Zp": "Separator, Paragraph",
+    "Cc": "Other, Control",
+    "Cf": "Other, Format",
+    "Cs": "Other, Surrogate",
+    "Co": "Other, Private Use",
+    "Cn": "Other, Unassigned",
+}
 
 
 def _get_emoji_data() -> dict[str, dict]:
@@ -61,6 +95,10 @@ def _codepoints(s: str) -> str:
     return " ".join(f"U+{ord(c):04X}" for c in s)
 
 
+def _utf8_bytes(s: str) -> str:
+    return " ".join(f"0x{b:02X}" for b in s.encode("utf-8"))
+
+
 def _safe_name(ch: str) -> str:
     try:
         return unicodedata.name(ch)
@@ -68,10 +106,24 @@ def _safe_name(ch: str) -> str:
         return ""
 
 
-def _rows() -> list[tuple[str, str]]:
+def _plane_of(cp: int) -> str:
+    # https://www.unicode.org/roadmaps/
+    if cp <= 0xFFFF:
+        return "BMP"
+    if cp <= 0x1FFFF:
+        return "SMP"
+    if cp <= 0x2FFFF:
+        return "SIP"
+    if cp <= 0x3FFFF:
+        return "TIP"
+    if cp <= 0x4FFFF:
+        return "SSP"
+    return "Plane?"
+
+
+def _emoji_rows() -> list[tuple[str, str]]:
     """
-    Build TAB-delimited rows: (glyph, display text).
-    We show only the display text in fzf (via --with-nth=2..), but pass {1} (glyph) to preview.
+    Build TAB-delimited rows: (glyph, display text) for emoji.
     """
     EMOJI_DATA = _get_emoji_data()
     rows: list[tuple[str, str]] = []
@@ -92,6 +144,49 @@ def _rows() -> list[tuple[str, str]]:
     return rows
 
 
+def _iter_unicode_chars(include_plane: Literal["bmp", "all"]) -> Iterable[str]:
+    start = 0x0000
+    end = 0x10FFFF if include_plane == "all" else 0xFFFF
+    for cp in range(start, end + 1):
+        # Skip surrogates; these are not real scalar values
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        ch = chr(cp)
+        # Only include assigned codepoints (those with a name)
+        try:
+            _ = unicodedata.name(ch)
+        except ValueError:
+            continue
+        yield ch
+
+
+def _unicode_rows(include_plane: Literal["bmp", "all"]) -> list[tuple[str, str]]:
+    """
+    Build rows for all assigned Unicode scalar values (by chosen plane range).
+    Display: "<glyph>  <Name> • <Category> • <Plane> [#tags]"
+    """
+    rows: list[tuple[str, str]] = []
+    for ch in _iter_unicode_chars(include_plane):
+        name = _safe_name(ch)
+        cat = unicodedata.category(ch)
+        cat_hr = CATEGORY_NAMES.get(cat, cat)
+        cp = ord(ch)
+        plane = _plane_of(cp)
+        tags = []
+        if unicodedata.combining(ch):
+            tags.append("combining")
+        if cat.startswith("C"):
+            tags.append("control")
+        if unicodedata.mirrored(ch):
+            tags.append("mirrored")
+        right = " • ".join([name or "—", cat_hr, plane])
+        trail = ("    " + " ".join(f"#{t}" for t in tags)) if tags else ""
+        display = f"{ch}  {right}{trail}"
+        rows.append((ch, display))
+    rows.sort(key=lambda r: r[1].lower())
+    return rows
+
+
 def _ensure_fzf() -> str:
     fzf = shutil.which("fzf")
     if not fzf:
@@ -99,30 +194,34 @@ def _ensure_fzf() -> str:
     return fzf
 
 
-def _print_preview(glyph: str) -> None:
+def _print_emoji_preview(glyph: str) -> bool:
+    """
+    Try printing an emoji-focused preview.
+    Returns True if glyph looked up via emoji data, else False to fall back.
+    """
     EMOJI_DATA = _get_emoji_data()
+    info = EMOJI_DATA.get(glyph)
+    if info is None:
+        return False
 
-    info = EMOJI_DATA.get(glyph, {})
     name = (info.get("en") or info.get("name") or _safe_name(glyph) or "").title()
     group = str(info.get("group") or "—")
     subgroup = str(info.get("subgroup") or info.get("sub_group") or "—")
     ver_val = info.get("E")
     ver = str(ver_val) if ver_val is not None else "—"
     status = str(info.get("status") or "—")
-    aliases = [str(a) for a in (info.get("aliases") or [])]
+    # aliases = [str(a) for a in (info.get("aliases") or [])]
     variations = [str(v) for v in (info.get("variations") or [])]
     tone_support = bool(info.get("skin_tone_support"))
 
-    # Metadata table — ensure every cell is a string or Renderable
     tbl = Table(show_header=False, box=None, pad_edge=False)
-    tbl.add_row("emoji", Text(f"{glyph}"))
+    tbl.add_row("Glyph", Text(f"{glyph}"))
     tbl.add_row("Name", Text(name or "—", style="bold"))
     tbl.add_row("Group", f"{group} / {subgroup}")
     tbl.add_row("Emoji ver.", ver)
     tbl.add_row("Status", status)
     tbl.add_row("Codepoints", _codepoints(glyph))
-    if aliases:
-        tbl.add_row("Aliases", ", ".join(aliases))
+    tbl.add_row("UTF-8", _utf8_bytes(glyph))
     console.print(tbl)
 
     # Variations
@@ -148,10 +247,78 @@ def _print_preview(glyph: str) -> None:
             )
         )
 
+    return True
+
+
+def _print_unicode_preview(glyph: str) -> None:
+    name = _safe_name(glyph) or "—"
+    cat = unicodedata.category(glyph)
+    cat_hr = CATEGORY_NAMES.get(cat, cat)
+    dec = None
+    try:
+        dec = unicodedata.decimal(glyph)
+    except Exception:
+        pass
+    dig = None
+    try:
+        dig = unicodedata.digit(glyph)
+    except Exception:
+        pass
+    num = None
+    try:
+        num = unicodedata.numeric(glyph)
+    except Exception:
+        pass
+
+    bidi = unicodedata.bidirectional(glyph) or "—"
+    eaw = unicodedata.east_asian_width(glyph) or "—"
+    comb = unicodedata.combining(glyph)
+    mirrored = "Yes" if unicodedata.mirrored(glyph) else "No"
+    decomp = unicodedata.decomposition(glyph) or "—"
+
+    tbl = Table(show_header=False, box=None, pad_edge=False)
+    tbl.add_row("Glyph", Text(f"{glyph}"))
+    tbl.add_row("Name", Text(name, style="bold"))
+    tbl.add_row("Category", f"{cat} ({cat_hr})")
+    tbl.add_row("Codepoints", _codepoints(glyph))
+    tbl.add_row("UTF-8", _utf8_bytes(glyph))
+    tbl.add_row("Combining", str(comb))
+    tbl.add_row("Bidi", bidi)
+    tbl.add_row("East Asian Width", eaw)
+    tbl.add_row("Mirrored", mirrored)
+    tbl.add_row("Decomposition", decomp)
+    if dec is not None:
+        tbl.add_row("Decimal", str(dec))
+    if dig is not None:
+        tbl.add_row("Digit", str(dig))
+    if num is not None:
+        tbl.add_row("Numeric", str(num))
+    console.print(tbl)
+
+
+def _print_preview(glyph: str) -> None:
+    # Prefer rich emoji preview; fall back to generic Unicode preview.
+    if not _print_emoji_preview(glyph):
+        _print_unicode_preview(glyph)
+
+
+def _build_rows(
+    scope: Literal["emoji", "unicode", "both"],
+    plane: Literal["bmp", "all"],
+) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    if scope in ("emoji", "both"):
+        rows.extend(_emoji_rows())
+    if scope in ("unicode", "both"):
+        rows.extend(_unicode_rows(plane))
+    # Sort once globally so "both" merges nicely
+    rows.sort(key=lambda r: r[1].lower())
+    return rows
+
 
 @app.command()
 def preview(
-    glyph: str = typer.Argument(..., help="(internal) emoji glyph passed from fzf"),
+    glyph: str = typer.Argument(..., help="(internal) glyph passed from fzf"),
 ):
     """Internal command used by fzf: `emoji_fzf.py preview {1}`"""
     if not glyph:
@@ -168,10 +335,23 @@ def pick(
         60, "--preview-width", help="Preview width percentage (1-100)."
     ),
     multi: bool = typer.Option(True, "--multi/--no-multi", help="Enable multi-select."),
+    scope: Literal["emoji", "unicode", "both"] = typer.Option(
+        "emoji",
+        "--scope",
+        help="Search set: 'emoji' (fast), 'unicode' (all assigned codepoints), or 'both'.",
+    ),
+    plane: Literal["bmp", "all"] = typer.Option(
+        "bmp",
+        "--plane",
+        help="For scope 'unicode' or 'both': limit to BMP (U+0000–U+FFFF) or include ALL planes.",
+    ),
 ):
-    """Open fzf to search all emojis with a Rich preview. Prints chosen emoji(s) to stdout."""
+    """
+    Open fzf to search emojis and/or all Unicode characters with a Rich preview.
+    Prints chosen glyph(s) to stdout.
+    """
     fzf = _ensure_fzf()
-    rows = _rows()
+    rows = _build_rows(scope, plane)
 
     delimiter = "\t"
     input_text = "\n".join(f"{g}{delimiter}{d}" for g, d in rows)
@@ -180,11 +360,17 @@ def pick(
     py = shlex.quote(sys.executable)
     preview_cmd = f"{py} {shlex.quote(this)} preview {{1}}"
 
+    prompt = {
+        "emoji": "emoji> ",
+        "unicode": "unicode> ",
+        "both": "glyph> ",
+    }[scope]
+
     opts: list[str] = [
         "--ansi",
         f"--height={height}%",
         "--reverse",
-        "--prompt=emoji> ",
+        f"--prompt={prompt}",
         "--delimiter",
         delimiter,
         "--with-nth=2..",
