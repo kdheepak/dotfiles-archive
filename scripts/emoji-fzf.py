@@ -224,4 +224,4 @@ def pick(
 
 
 if __name__ == "__main__":
-    app(standalone_mode=True)  # default command = pick
+    app()
