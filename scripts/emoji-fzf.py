@@ -339,7 +339,7 @@ def pick(
         help="Search set: 'emoji' (fast), 'unicode' (all assigned codepoints), or 'both'.",
     ),
     plane: Literal["bmp", "all"] = typer.Option(
-        "bmp",
+        "all",
         "--plane",
         help="For scope 'unicode' or 'both': limit to BMP (U+0000–U+FFFF) or include ALL planes.",
     ),
