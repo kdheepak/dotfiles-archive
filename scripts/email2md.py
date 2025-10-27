@@ -1,4 +1,5 @@
 #!/usr/bin/env -S uv --quiet run --script
+# -*- coding: utf-8 -*-
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
@@ -135,7 +136,7 @@ def convert_msg_to_md(
                 )
                 filename = f"{base_name}{ext}"
             else:
-                filename = f"attachment_{len(attachment_links)+1}{ext}"
+                filename = f"attachment_{len(attachment_links) + 1}{ext}"
 
         # Ensure unique filename
         filepath = assets_folder / filename
@@ -164,7 +165,7 @@ def convert_msg_to_md(
 
     # Replace inline images in HTML body using CID mapping
     if body and "<html" in body.lower() and cid_to_filename:
-        console.print(f"[blue]Replacing CIDs in HTML content...[/blue]")
+        console.print("[blue]Replacing CIDs in HTML content...[/blue]")
 
         # Replace various CID formats
         for cid, filename in cid_to_filename.items():
@@ -175,7 +176,7 @@ def convert_msg_to_md(
                 # Standard cid: references
                 (rf"cid:{re.escape(cid)}", replacement_path),
                 (
-                    rf'cid:{re.escape(cid.replace(" ", "%20"))}',
+                    rf"cid:{re.escape(cid.replace(' ', '%20'))}",
                     replacement_path,
                 ),  # URL encoded
                 # src attribute patterns

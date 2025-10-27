@@ -1,11 +1,11 @@
 #!/usr/bin/env -S uv --quiet run --script
+# -*- coding: utf-8 -*-
 # /// script
 # requires-python = ">=3.13"
 # dependencies = ["typer", "rich", "pygments", "pyyaml"]
 # ///
 
 import os
-import sys
 import shutil
 import subprocess
 import typer

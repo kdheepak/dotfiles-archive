@@ -1,4 +1,4 @@
-#!/usr/bin/env -S uv run
+#!/usr/bin/env -S uv --quiet run --script
 # -*- coding: utf-8 -*-
 # /// script
 # requires-python = ">=3.11"

@@ -1,60 +1,38 @@
-#!/usr/bin/env -S uv run
+#!/usr/bin/env -S uv run --script
 # -*- coding: utf-8 -*-
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["typer>=0.12", "rich>=13.7"]
+# ///
+
+
+from __future__ import annotations
+
 import os
 import platform
-import sys
-import argparse
+from pathlib import Path
+from typing import Dict, Iterable, List, Union
 
-YELLOW = "\033[93m"
-GREEN = "\033[92m"
-RED = "\033[91m"
-CYAN = "\033[96m"
-BOLD = "\033[1m"
-RESET = "\033[0m"
+import typer
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.table import Table
+from rich.text import Text
 
-
-def print_current_env_vars(env_keys):
-    """Print current environment variable values as a table."""
-    # ANSI color codes
-    CYAN = "\033[96m"
-    BOLD = "\033[1m"
-    RESET = "\033[0m"
-
-    print(f"{BOLD}Current Environment Variables:{RESET}")
-    print("─" * 80)  # Use box-drawing character
-    print(f"{BOLD}{'Variable':<30} │ {'Current Value'}{RESET}")
-    print("─" * 80)
-
-    for key in env_keys:
-        value = os.environ.get(key, f"{RED}(not set){RESET}")
-        # Truncate long values
-        if len(value) > 45:
-            value = value[:42] + "..."
-        print(f"{CYAN}{key:<30}{RESET} │ {value}")
-    print()
+app = typer.Typer(
+    add_completion=False, help="Generate env var setup commands for SSL certificates."
+)
+console = Console()
 
 
-def print_env_setup(cert_path, show_all=False):
-    """Print environment variable setup commands for the target OS."""
-    # ANSI color codes
-    YELLOW = "\033[93m"
-    GREEN = "\033[92m"
-    RED = "\033[91m"
-    CYAN = "\033[96m"
-    BOLD = "\033[1m"
-    RESET = "\033[0m"
+def _build_env_vars(cert_path: Path) -> Dict[str, Union[str, int]]:
+    cert_path = cert_path.expanduser()
+    cert_dir = cert_path.parent
+    cert_path_native = os.path.normpath(str(cert_path))
+    cert_dir_native = os.path.normpath(str(cert_dir))
 
-    if platform.system() == "Windows":
-        os.system("")
-
-    cert_path = os.path.expanduser(cert_path)
-    cert_dir = os.path.dirname(cert_path)
-
-    # Convert paths to use native separators
-    cert_path_native = os.path.normpath(cert_path)
-    cert_dir_native = os.path.normpath(cert_dir)
-
-    env_vars = {
+    return {
         "CURL_CA_BUNDLE": cert_path_native,
         "REQUESTS_CA_BUNDLE": cert_path_native,
         "SSL_CERT_FILE": cert_path_native,
@@ -63,79 +41,122 @@ def print_env_setup(cert_path, show_all=False):
         "SSL_VERIFY": "true",
     }
 
-    # Print current env var table
-    print_current_env_vars(env_vars.keys())
 
-    def print_section(title, lines):
-        print(f"{BOLD}{title}{RESET}:")
-        print()
-        for line in lines:
-            print(line)
-        print()
+def _print_current_env_vars(env_keys: Iterable[str]) -> None:
+    table = Table(title="Current Environment Variables", expand=True)
+    table.add_column("Variable", style="cyan", no_wrap=True)
+    table.add_column("Current Value", style="white")
 
-    print(f"{YELLOW}NOTE: Using certificate path: {cert_path_native}{RESET}\n")
+    for key in env_keys:
+        value = os.environ.get(key)
+        if value is None:
+            table.add_row(key, Text("(not set)", style="red"))
+        else:
+            display = value if len(value) <= 45 else value[:42] + "..."
+            table.add_row(key, display)
 
-    if show_all or platform.system() == "Windows":
-        # Windows commands need quotes around paths that may contain spaces
-        windows_commands = []
-        for var, val in env_vars.items():
-            # Quote the value if it's a string path (not a number like PYTHONHTTPSVERIFY)
-            if isinstance(val, str) and not val.isdigit():
-                windows_commands.append(f'setx {var} "{val}"')
-            else:
-                windows_commands.append(f"setx {var} {val}")
+    console.print(table)
+    console.print()
 
-        print_section(
+
+def _section(
+    title: str, items: List[Union[str, Text, Syntax]], subtitle: str | None = None
+) -> None:
+    """
+    Render a titled panel with a stack of Rich renderables (strings/Text/Syntax).
+    """
+    group = Group(*items)
+    console.print(Panel.fit(group, title=title, subtitle=subtitle))
+
+
+def _windows_commands(env_vars: Dict[str, Union[str, int]]) -> str:
+    lines = []
+    for var, val in env_vars.items():
+        if isinstance(val, str) and not val.isdigit():
+            lines.append(f'setx {var} "{val}"')
+        else:
+            lines.append(f"setx {var} {val}")
+    return "\n".join(lines)
+
+
+def _bash_commands(env_vars: Dict[str, Union[str, int]]) -> str:
+    lines = []
+    for var, val in env_vars.items():
+        if isinstance(val, str) and not val.isdigit():
+            lines.append(f'export {var}="{val}"')
+        else:
+            lines.append(f"export {var}={val}")
+    return "\n".join(lines)
+
+
+def _show_instructions(env_vars: Dict[str, Union[str, int]], show_all: bool) -> None:
+    sysname = platform.system()
+
+    console.print(
+        Text(
+            f"NOTE: Using certificate path: {env_vars['SSL_CERT_FILE']}", style="yellow"
+        )
+    )
+    console.print()
+
+    _print_current_env_vars(env_vars.keys())
+
+    want_windows = show_all or sysname == "Windows"
+    want_posix = show_all or sysname in {"Linux", "Darwin"}
+
+    if want_windows:
+        code = _windows_commands(env_vars)
+        _section(
             "Windows Setup (Command Prompt)",
             [
-                f"{GREEN}Run the following commands in Command Prompt:{RESET}\n",
-                *windows_commands,
+                "[green]Run the following commands in Command Prompt:[/green]",
+                "",
+                Syntax(code, "batch", word_wrap=True),
             ],
+            subtitle="Persistent via setx",
         )
 
-    if show_all or platform.system() in ["Linux", "Darwin"]:
-        # Bash/zsh commands need quotes around paths that may contain spaces
-        bash_commands = []
-        for var, val in env_vars.items():
-            # Quote the value if it's a string path (not a number like PYTHONHTTPSVERIFY)
-            if isinstance(val, str) and not val.isdigit():
-                bash_commands.append(f'export {var}="{val}"')
-            else:
-                bash_commands.append(f"export {var}={val}")
-
-        print_section(
+    if want_posix:
+        code = _bash_commands(env_vars)
+        _section(
             "macOS/Linux Setup (bash/zsh)",
             [
-                f"{GREEN}Add the following lines to your shell config file "
-                f"(`~/.bashrc`, `~/.zshrc`, etc.):{RESET}\n",
-                *bash_commands,
-                f"\n{CYAN}Then restart your terminal to apply changes.{RESET}",
+                "[green]Add the following lines to your shell config file "
+                "(`~/.bashrc`, `~/.zshrc`, etc.):[/green]",
+                "",
+                Syntax(code, "bash", word_wrap=True),
+                "",
+                "[cyan]Then restart your terminal to apply changes.[/cyan]",
             ],
         )
 
-    if not show_all and platform.system() not in ["Windows", "Linux", "Darwin"]:
-        print(
-            f"{RED}Unsupported operating system: {platform.system()}{RESET}",
-            file=sys.stderr,
+    if not show_all and not (want_windows or want_posix):
+        console.print(
+            Text(f"Unsupported operating system: {sysname}", style="bold red")
         )
-        sys.exit(1)
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def main(
+    cert_path: Path = typer.Argument(
+        Path("~/.config/certs/cacert.pem"),
+        help="Path to the certificate file.",
+    ),
+    show_all: bool = typer.Option(
+        False,
+        "--all",
+        "-a",
+        help="Show setup instructions for all supported operating systems.",
+    ),
+) -> None:
+    """
+    Generate environment variable setup commands for SSL certificates and show
+    current values in a table.
+    """
+    env_vars = _build_env_vars(cert_path)
+    _show_instructions(env_vars, show_all)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Generate environment variable setup commands for SSL certificates."
-    )
-    parser.add_argument(
-        "cert_path",
-        nargs="?",
-        default="~/.config/certs/cacert.pem",
-        help="Path to the certificate file (default: ~/.config/certs/cacert.pem)",
-    )
-    parser.add_argument(
-        "-a",
-        "--all",
-        action="store_true",
-        help="Show setup instructions for all supported operating systems",
-    )
-    args = parser.parse_args()
-    print_env_setup(args.cert_path, show_all=args.all)
+    app()
