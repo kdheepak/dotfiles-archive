@@ -121,6 +121,7 @@ def _generate(
         - Start with: #!/usr/bin/env -S uv run --script
         - Include a # /// script metadata block with dependencies, e.g.:
             ```
+            # -*- coding: utf-8 -*-
             # /// script
             # requires-python = ">=3.12"
             # dependencies = [
