@@ -79,7 +79,3 @@ ln -s "$(pwd)/justfile" ~/.config/just/justfile
 
 rm ~/.Brewfile
 ln -s "$(pwd)/Brewfile" ~/.Brewfile
-
-rm ~/.pixi/manifests/pixi-global.toml
-mkdir -p ~/.pixi/manifests
-ln -s "$(pwd)/pixi-global.toml" ~/.pixi/manifests/pixi-global.toml
