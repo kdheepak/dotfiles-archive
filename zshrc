@@ -219,7 +219,7 @@ bashcompinit
 
 ### End of Zinit's installer chunk
 
-export PATH="$HOME/.pixi/bin:$PATH"
+eval "$(~/.local/bin/mise activate zsh)"
 
 # need to do this after mise
 zinit light loiccoyle/zsh-github-copilot
@@ -247,9 +247,3 @@ eval "$(zoxide init zsh --cmd cd)"
 # eval "$(uvx uv-shell-hook zsh)"
 
 autoload -Uz compinit && compinit  # redundant with Oh My Zsh
-eval "$(pixi completion --shell zsh)"
-
-# zsh, default on macOS
-fpath+=(~/.pixi/completions/zsh)
-autoload -Uz compinit
-compinit
