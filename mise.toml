@@ -1,0 +1,16 @@
+redactions = [
+  # "API_KEY",
+  "*_TOKEN",
+  # "PASSWORD",
+]
+
+[task_config]
+includes = ["script"]
+
+[tasks.embed]
+run = """
+#!/bin/sh
+if [ -n "ok" ]; then
+  echo ok
+fi
+"""

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
-echo "Installing requirements"
 
-git clone https://github.com/chriskempson/base16-shell.git ~/.config/base16-shell
+set -eo pipefail
+
+sh -c "$(curl -fsLS get.chezmoi.io)" -- init --verbose --apply kdheepak

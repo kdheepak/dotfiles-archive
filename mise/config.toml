@@ -243,6 +243,12 @@ cosign = { version = "latest", os = [
   "macos",
 ] }
 
+# gitleaks - a tool to detect secrets in git repositories
+"gitleaks" = { version = "latest", os = [
+  "macos",
+] }
+
+
 # --- File System and Navigation ---
 
 # Better cat with syntax highlighting
@@ -300,7 +306,7 @@ dua = { version = "latest", os = [
 ] }
 
 # A disk utility
-duf = { version = "latest", os = ["macos"] }
+# duf = { version = "latest", os = ["macos"] }
 
 # --- Git and Version Control ---
 
@@ -343,7 +349,7 @@ delta = { version = "latest", os = [
 "cargo:ftdv" = { version = "latest", os = ["macos"] }
 
 # Git branch cleanup tool
-"cargo:git-trim" = { version = "latest", os = [
+"git-trim" = { version = "latest", os = [
   "macos",
   "windows",
 ] }

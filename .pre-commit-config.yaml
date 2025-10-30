@@ -1,8 +1,17 @@
+---
 default_stages: [pre-commit]
 
 repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks
+        name: gitleaks
+        language: system
+        stages:
+          - pre-commit
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.0.1
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: check-executables-have-shebangs
@@ -19,11 +28,38 @@ repos:
     hooks:
       # Run the linter.
       - id: ruff-check
-        args: [ --fix ]
+        args: [--fix]
       # Run the formatter.
       - id: ruff-format
   - repo: https://github.com/kdheepak/conventional-commits-precommit
     rev: v0.3.8
     hooks:
       - id: check-commit-msg
-
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.11.0
+    hooks:
+      - id: shellcheck
+        name: shellcheck
+        args:
+          - --exclude=SC2148
+          - --severity=warning
+        entry: shellcheck
+        exclude: ^home/.*/(modify_.*\.sh|.*\.tmpl)$
+        language: system
+        stages:
+          - pre-commit
+  - repo: https://github.com/adrienverge/yamllint.git
+    rev: v1.37.1
+    hooks:
+      - id: yamllint
+        args:
+          - --strict
+        # Use yamlfmt installed on the system instead of building with Go
+        language: system
+        stages:
+          - pre-commit
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.15.2
+    hooks:
+      - id: zizmor
+        files: ^.github/workflows/.*\.ya?ml$
